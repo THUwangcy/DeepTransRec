@@ -19,9 +19,9 @@ tf.flags.DEFINE_integer("user_min", 5, "Minimal items a user has to has interact
 tf.flags.DEFINE_integer("item_min", 5, "Minimal users a item has to has interaction with for it to be included.")
 tf.flags.DEFINE_integer("epoch_max", 3000, "Maximal epochs to train.")
 tf.flags.DEFINE_integer("k", 10, "Embedding dimension.")
-tf.flags.DEFINE_integer("reg", 0.01, "L2 regularizer for item embedding and all user embedding.")
-tf.flags.DEFINE_integer("bias_reg", 0.01, "L2 regularizer for item bias.")
-tf.flags.DEFINE_integer("user_reg", 0.01, "L2 regularizer for user embedding.")
+tf.flags.DEFINE_integer("reg", 0.1, "L2 regularizer for item embedding and all user embedding.")
+tf.flags.DEFINE_integer("bias_reg", 0.1, "L2 regularizer for item bias.")
+tf.flags.DEFINE_integer("user_reg", 0.1, "L2 regularizer for user embedding.")
 
 FLAGS = tf.flags.FLAGS
 
@@ -30,7 +30,7 @@ def go_transrec(opts, corp, session):
     model = TransRec(opts, corp, session)
     model.train()
     model.save_model()
-    print("  TEST: AUC = {:<.4f}".format(model.best_test_auc))
+    model.eval(sample=False)
 
 
 def go_poprec(opts, corp, session):

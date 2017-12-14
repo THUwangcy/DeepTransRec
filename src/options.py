@@ -38,6 +38,9 @@ class Options:
         # HR topN
         self.top_n = 50
 
+        # Train user batch size
+        self.train_batch_size = 16
+
         # Eval user batch size
         self.eval_batch_size = 1000
 
@@ -59,4 +62,4 @@ class Options:
             os.makedirs(self.checkpoints_path)
 
         # Write summary
-        self.write_summary = False
+        self.write_summary = True

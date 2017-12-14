@@ -31,6 +31,10 @@ class Model(object):
         self.best_valid_auc = -1
         self.best_test_auc = -1
         self.dist_to_best_iter = 0
+        self.final_valid_auc = -1
+        self.final_test_auc = -1
+        self.final_valid_hr = -1
+        self.final_test_hr = -1
 
         # -------------------------------
         #        Tensorflow Node
@@ -191,7 +195,7 @@ class Model(object):
         summary_test = tf.summary.scalar("Test AUC", self._avg_test_auc)
         self._eval_summary = tf.summary.merge([summary_valid, summary_test])
 
-    def get_batch_data(self, batch_no, eval_users, sample):
+    def get_eval_batch(self, batch_no, eval_users, sample):
         opts = self._options
         corp = self._corpus
         users, prev_items, valid_items, test_items, mask_indices = list(), list(), list(), list(), list()
@@ -281,12 +285,8 @@ class Model(object):
             # Batch begin!
             prepare_start = time.time()
             user_indice, users, prev_items, valid_items, test_items, mask_indices, eval_item_pool = \
-                self.get_batch_data(b_no, eval_users, sample)
+                self.get_eval_batch(b_no, eval_users, sample)
             n_users += (user_indice + 1)
-            prepare_time += time.time() - prepare_start
-
-            # run session to get AUC and HR
-            session_start = time.time()
             feed_dict = {
                 self._eval_user: users,
                 self._eval_prev_item: prev_items,
@@ -295,6 +295,10 @@ class Model(object):
                 self._eval_item: eval_item_pool,
                 self._eval_mask_indices: mask_indices
             }
+            prepare_time += time.time() - prepare_start
+
+            # run session to get AUC and HR
+            session_start = time.time()
             [cur_valid_auc, cur_test_auc, max_cnt, cur_valid_hr, cur_test_hr] = self._session.run(
                 [self._valid_auc, self._test_auc, self._max_cnt, self._valid_hr, self._test_hr],
                 feed_dict=feed_dict)
@@ -320,10 +324,18 @@ class Model(object):
             feed_dict=feed_dict)
         if opts.write_summary:
             self._test_writer.add_summary(summary, epoch + 1)
+
+        if not sample:
+            self.final_test_auc = test_auc
+            self.final_valid_auc = valid_auc
+            self.final_test_hr = test_hr
+            self.final_valid_hr = valid_hr
+            print()
+
         print("\n  [Valid: AUC = {0:<.6f}, HR@{1} = {2:<.4f}%], Test: AUC = {3:<.6f}, HR@{1} = {4:<.4f}%  "
               "\n  Time  np: {5:<.3f}s tf: {6:<.3f}s total:[{7:<.3f}s]".format(
-               valid_auc, opts.top_n, valid_hr, test_auc, test_hr,
-               prepare_time, session_time, time.time() - eval_start))
+                valid_auc, opts.top_n, valid_hr, test_auc, test_hr,
+                prepare_time, session_time, time.time() - eval_start))
         print('  ---------------------------------------------------------------------------------', end="\n\n")
         sys.stdout.flush()
 
