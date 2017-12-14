@@ -3,3 +3,4 @@ checkpoints/
 logs/
 .idea
 *.pyc
+.DS_Store
