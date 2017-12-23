@@ -7,8 +7,6 @@ import numpy as np
 import tensorflow as tf
 from abc import ABCMeta, abstractmethod
 
-from src.common import utils
-
 
 class Model(object):
     __metaclass__ = ABCMeta
@@ -26,12 +24,8 @@ class Model(object):
         self._valid_pos_item = list()    # valid item (also item before test item)
         self._test_pos_item = list()     # test item
         self._clicked_per_user = list()  # distinct items clicked per user
-
-        # Eval
-        self.final_valid_auc = -1
-        self.final_test_auc = -1
-        self.final_valid_hr = -1
-        self.final_test_hr = -1
+        self._len_per_user = list()      # sequence length per user
+        self._train_legal_user = None  # users can be sampled to train step
 
         # -------------------------------
         #        Tensorflow Node
@@ -84,6 +78,10 @@ class Model(object):
                 self._valid_pos_item.append(-1)
                 self._valid_prev_item.append(-1)
             self._clicked_per_user.append(set([x['item'] for x in corp.pos_per_user[u]]))
+            self._len_per_user.append(len(corp.pos_per_user[u]))
+        train_legal_indice = np.array([len(x) for x in self._clicked_per_user]) >= 2
+        self._train_legal_user = np.arange(corp.n_users)[train_legal_indice]
+        self._len_per_user = np.array(self._len_per_user)
 
     @abstractmethod
     def predict(self, cur_user, prev_item, target_item):
@@ -94,10 +92,6 @@ class Model(object):
         :param target_item: shape [batch_size, item_num], every row is the items to be predicted for each user
         :return: shape [batch_size, item_num], values for each target_item
         """
-        pass
-
-    @abstractmethod
-    def predict_eval(self, cur_user, prev_item, target_item):
         pass
 
     @abstractmethod
@@ -197,16 +191,17 @@ class Model(object):
         summary_test = tf.summary.scalar("Test AUC", self._avg_test_auc)
         self._eval_summary = tf.summary.merge([summary_valid, summary_test])
 
-    def get_eval_batch(self, batch_no, eval_users, sample):
+    def get_eval_batch(self, batch_no, sample):
         opts = self._options
         corp = self._corpus
         users, prev_items, valid_items, test_items, mask_indices = list(), list(), list(), list(), list()
 
         batch_size = opts.eval_batch_size
+        eval_users = np.arange(corp.n_users)
         sample_item = min(corp.n_items, opts.eval_sample_item)
         # if sample, sample opts.eval_sample_item negtive items
         if sample:
-            eval_item_pool = np.random.choice(list(range(corp.n_items)), sample_item, replace=False)
+            eval_item_pool = np.random.choice(np.arange(corp.n_items), sample_item, replace=False)
             # record item index in current eval_item_pool, only useful when sampling items
             item2ind = dict()
             for ind, item in enumerate(eval_item_pool):
@@ -231,7 +226,7 @@ class Model(object):
             sample_user = opts.eval_sample_user
             if sample and len(eval_users) > sample_user and np.random.randint(0, len(eval_users)) > sample_user:
                 continue
-            # valid user
+            # legal user
             user_indice += 1
             users.append(u)
             prev_items.append(prev)
@@ -258,6 +253,7 @@ class Model(object):
             if not test_pos_in and self._test_pos_item[u] in eval_item_pool:
                 item_indice = get_item_indice(self._test_pos_item[u])
                 mask_indices.append([user_indice, item_indice])
+
         return user_indice, users, prev_items, valid_items, test_items, mask_indices, eval_item_pool
 
     def eval(self, sample=True, epoch=0):
@@ -287,7 +283,7 @@ class Model(object):
             # Batch begin!
             prepare_start = time.time()
             user_indice, users, prev_items, valid_items, test_items, mask_indices, eval_item_pool = \
-                self.get_eval_batch(b_no, eval_users, sample)
+                self.get_eval_batch(b_no, sample)
             n_users += (user_indice + 1)
             feed_dict = {
                 self._eval_user: users,
@@ -327,16 +323,9 @@ class Model(object):
         if opts.write_summary:
             self._test_writer.add_summary(summary, epoch + 1)
 
-        if not sample:
-            self.final_test_auc = test_auc
-            self.final_valid_auc = valid_auc
-            self.final_test_hr = test_hr
-            self.final_valid_hr = valid_hr
-            print()
-
-        print("\n  [Valid: AUC = {0:<.6f}, HR@{1} = {2:<.4f}%], Test: AUC = {3:<.6f}, HR@{1} = {4:<.4f}%  "
-              "\n  Time  np: {5:<.3f}s tf: {6:<.3f}s total:[{7:<.3f}s]".format(
-                valid_auc, opts.top_n, valid_hr, test_auc, test_hr,
+        print("\n  Iter {0:>3}: [Valid: AUC = {1:<.6f}, HR@{2} = {3:<.4f}%], Test: AUC = {4:<.6f}, HR@{2} = {5:<.4f}%  "
+              "\n  Time  np: {6:<.3f}s tf: {7:<.3f}s total:[{8:<.3f}s]".format(
+                epoch, valid_auc, opts.top_n, valid_hr, test_auc, test_hr,
                 prepare_time, session_time, time.time() - eval_start))
         print('  ---------------------------------------------------------------------------------', end="\n\n")
         sys.stdout.flush()

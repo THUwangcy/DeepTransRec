@@ -21,12 +21,9 @@ class PopRec(Model):
             for record in corp.pos_per_user[u]:
                 self._pop_per_item[record['item']] += 1
 
-    def predict(self, cur_user, prev_item, target_item, norm):
+    def predict(self, cur_user, prev_item, target_item):
         pop_val = tf.gather(tf.convert_to_tensor(self._pop_per_item), target_item)
         return pop_val
-
-    def save_best_parameters(self):
-        pass
 
     def save_model(self):
         pass
