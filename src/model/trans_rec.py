@@ -22,6 +22,10 @@ class TransRec(Model):
         self._item_emb = None
         self._item_bias = None
 
+        # Norm parameter
+        self._all_user_emb_norm = None
+        self._item_emb_norm = None
+
         # Best parameter
         self._all_user_emb_best = None
         self._user_emb_best = None
@@ -42,9 +46,12 @@ class TransRec(Model):
         self.global_step = None
         self._debug = None
         self._train_writer = None
-        # Norm
+        # Op
         self._norm_all_user_emb = None
         self._norm_item_emb = None
+        self._norm_param_op = None
+        self._save_best_param_op = None
+        self._restore_best_param_op = None
         # Summary
         self._loss_summary = None
 
@@ -54,18 +61,49 @@ class TransRec(Model):
         # Properly initialize all variables.
         tf.global_variables_initializer().run()
         self.saver = tf.train.Saver()
-        files = os.listdir(self._options.checkpoints_path)
-        for f in sorted(files)[::-1]:
-            if not f.startswith('~') and not f.startswith('.') and f.endswith('.ckpt.index'):
-                ckpt_path = self._options.checkpoints_path + f[:f.rfind('.')]
-                self.load_model(ckpt_path)
-                break
+
+        if len(self._options.checkpoint_name) > 0:
+            ckpt_path = self._options.checkpoints_path + self._options.checkpoint_name
+            self.load_model(ckpt_path)
 
         if self._options.write_summary:
             self._train_writer = tf.summary.FileWriter("{}{}_{}/train".format(
                 self._options.save_path, self._options.timestamp, self.to_string()), self._session.graph)
             self._test_writer = tf.summary.FileWriter("{}{}_{}/test".format(
                 self._options.save_path, self._options.timestamp, self.to_string()))
+
+    def load_params(self, filename):
+        opts = self._options
+        corp = self._corpus
+        with open("../data/" + filename, 'r') as f:
+            params = f.read().split()
+            all_user_emb = np.zeros([opts.emb_dim], dtype=np.float32)
+            user_emb = np.zeros([corp.n_users, opts.emb_dim], dtype=np.float32)
+            item_bias = np.zeros([corp.n_items], dtype=np.float32)
+            item_emb = np.zeros([corp.n_items, opts.emb_dim], dtype=np.float32)
+            index = 0
+            for i in range(opts.emb_dim):
+                all_user_emb[i] = params[index + i]
+            index += opts.emb_dim
+            for i in range(corp.n_users):
+                for j in range(opts.emb_dim):
+                    user_emb[i][j] = params[index + j]
+                index += opts.emb_dim
+            for i in range(corp.n_items):
+                item_bias[i] = params[index + i]
+            index += corp.n_items
+            for i in range(corp.n_items):
+                for j in range(opts.emb_dim):
+                    item_emb[i][j] = params[index + j]
+                index += opts.emb_dim
+            assert(index == len(params))
+            self._session.run([
+                tf.assign(self._all_user_emb, tf.convert_to_tensor(all_user_emb)),
+                tf.assign(self._user_emb, tf.convert_to_tensor(user_emb)),
+                tf.assign(self._item_bias, tf.convert_to_tensor(item_bias)),
+                tf.assign(self._item_emb, tf.convert_to_tensor(item_emb))
+            ])
+        self._session.run(self._norm_param_op)
 
     def predict(self, cur_user, prev_item, target_item):
         with tf.name_scope('prob'):
@@ -77,41 +115,20 @@ class TransRec(Model):
             cur_user_emb = tf.gather(self._user_emb, cur_user)
             pred_item_emb = tf.tile(tf.expand_dims(self._all_user_emb, 0), [user_num, 1]) + cur_user_emb + prev_item_emb
             pred_item_emb = tf.tile(tf.expand_dims(pred_item_emb, 1), [1, item_num, 1])
-            return target_item_bias - self.dist(pred_item_emb, target_item_emb)
+            return -target_item_bias - self.dist(pred_item_emb, target_item_emb)
 
-    def save_model(self):
-        opts = self._options
-        path = self.saver.save(self._session, "{}{}_{}.ckpt".format(
-            opts.checkpoints_path, opts.timestamp, self.last_save_epoch))
-        print("  Saved to {}".format(path), end="\n\n")
-
-    def to_string(self):
-        opts = self._options
-        return "TransRec__K_{}_lambda_{}_relationReg_{}_biasReg_{}".format(
-            opts.emb_dim, opts.reg, opts.user_reg, opts.bias_reg)
-
-    def save_best_parameters(self):
-        self._session.run([
-            tf.assign(self._all_user_emb_best, self._all_user_emb),
-            tf.assign(self._user_emb_best, self._user_emb),
-            tf.assign(self._item_emb_best, self._item_emb),
-            tf.assign(self._item_bias_best, self._item_bias)
-        ])
-
-    def restore_best_parameters(self):
-        self._session.run([
-            tf.assign(self._all_user_emb, self._all_user_emb_best),
-            tf.assign(self._user_emb, self._user_emb_best),
-            tf.assign(self._item_emb, self._item_emb_best),
-            tf.assign(self._item_bias, self._item_bias_best)
-        ])
-
-    def load_model(self, file_path):
-        file_name = file_path[file_path.rfind('/') + 1:file_path.rfind('.')]
-        self._options.timestamp = file_name.split('_')[0]
-        self.last_save_epoch = int(file_name.split('_')[1])
-        self.saver.restore(self._session, file_path)
-        print("  Load model from {}".format(file_path), end="\n\n")
+    def predict_eval(self, cur_user, prev_item, target_item):
+        with tf.name_scope('prob'):
+            user_num = tf.size(cur_user)
+            item_num = tf.shape(target_item)[1]
+            target_item_bias = tf.gather(self._item_bias, target_item)
+            target_item_emb = tf.gather(self._item_emb_norm, target_item)
+            prev_item_emb = tf.gather(self._item_emb_norm, prev_item)
+            cur_user_emb = tf.gather(self._user_emb, cur_user)
+            pred_item_emb = tf.tile(tf.expand_dims(self._all_user_emb, 0), [user_num, 1]) \
+                + cur_user_emb + prev_item_emb
+            pred_item_emb = tf.tile(tf.expand_dims(pred_item_emb, 1), [1, item_num, 1])
+            return -target_item_bias - self.dist(pred_item_emb, target_item_emb)
 
     def dist(self, emb1, emb2):
         return tf.reduce_sum(tf.square(emb1 - emb2), tf.rank(emb1) - 1)
@@ -160,27 +177,30 @@ class TransRec(Model):
         """Build the graph for the loss."""
         opts = self._options
         with tf.name_scope("loss"):
+            item_num = tf.size(prev_item)
             pos_item_pred, neg_item_pred = tf.gather(item_pred, 0, axis=1), tf.gather(item_pred, 1, axis=1)
-            p = tf.reduce_mean(tf.log(tf.sigmoid(pos_item_pred - neg_item_pred)))
+            p = tf.reduce_sum(tf.log(tf.sigmoid(pos_item_pred - neg_item_pred)))
             eval_item = tf.concat([pos_item, neg_item], 0)
             eval_item_bias = tf.gather(self._item_bias, eval_item)
             eval_item_emb = tf.gather(self._item_emb, eval_item)
             prev_item_emb = tf.gather(self._item_emb, prev_item)
             cur_user_emb = tf.gather(self._user_emb, cur_user)
-            related_params = tf.concat([eval_item_emb, prev_item_emb, tf.expand_dims(self._all_user_emb, 0)], 0)
+            related_params = tf.concat([eval_item_emb, prev_item_emb,
+                                        tf.tile(tf.expand_dims(self._all_user_emb, 0), [item_num, 1])], 0)
             reg_losses = tf.nn.l2_loss(related_params) * opts.reg + \
                          tf.nn.l2_loss(eval_item_bias) * opts.bias_reg + \
                          tf.nn.l2_loss(cur_user_emb) * opts.user_reg
-            return -p + reg_losses
+            return -p, tf.reduce_sum(reg_losses)
 
     def optimize(self, loss):
         """Build the graph to optimize the loss function."""
         opts = self._options
-        optimizer = tf.train.GradientDescentOptimizer(opts.lr)
+        # optimizer = tf.train.GradientDescentOptimizer(opts.lr)
+        optimizer = tf.train.AdamOptimizer(learning_rate=opts.lr, beta1=0.9, beta2=0.999, epsilon=1e-8)
         train = optimizer.minimize(loss, global_step=self.global_step)
         self._train = train
 
-    def save_params_graph(self):
+    def build_save_params_graph(self):
         opts = self._options
         corp = self._corpus
         self._all_user_emb_best = tf.get_variable(
@@ -191,6 +211,30 @@ class TransRec(Model):
             shape=[corp.n_items], trainable=False, name="item_bias_best")
         self._item_emb_best = tf.get_variable(
             shape=[corp.n_items, opts.emb_dim], trainable=False, name="item_emb_best")
+        self._save_best_param_op = [
+            tf.assign(self._all_user_emb_best, self._all_user_emb),
+            tf.assign(self._user_emb_best, self._user_emb),
+            tf.assign(self._item_emb_best, self._item_emb),
+            tf.assign(self._item_bias_best, self._item_bias)
+        ]
+        self._restore_best_param_op = [
+            tf.assign(self._all_user_emb, self._all_user_emb_best),
+            tf.assign(self._user_emb, self._user_emb_best),
+            tf.assign(self._item_emb, self._item_emb_best),
+            tf.assign(self._item_bias, self._item_bias_best)
+        ]
+
+    def build_norm_params_graph(self):
+        opts = self._options
+        corp = self._corpus
+        self._all_user_emb_norm = tf.get_variable(
+            shape=[opts.emb_dim], trainable=False, name="all_user_emb_norm")
+        self._item_emb_norm = tf.get_variable(
+            shape=[corp.n_items, opts.emb_dim], trainable=False, name="item_emb_norm")
+        self._norm_param_op = [
+            tf.assign(self._item_emb_norm, tf.nn.l2_normalize(self._item_emb, dim=1, epsilon=1.0)),
+            # tf.assign(self._all_user_emb_norm, tf.nn.l2_normalize(self._all_user_emb, dim=0, epsilon=1.0))
+        ]
 
     def build_graph(self):
         # Declace input placeholder
@@ -205,16 +249,18 @@ class TransRec(Model):
         item_pred = self.forward(cur_user, prev_item, pos_item, neg_item)
 
         # calculate loss
-        loss = self.loss(item_pred, cur_user, prev_item, pos_item, neg_item)
-        self._loss = loss
+        l1, l2 = self.loss(item_pred, cur_user, prev_item, pos_item, neg_item)
+        self._loss = l1 + l2
+        self._loss1, self._loss2 = l1, l2
 
         # optimize
-        self.optimize(loss)
+        self.optimize(self._loss)
 
-        self.save_params_graph()
+        self.build_save_params_graph()
+        self.build_norm_params_graph()
 
         # summary
-        loss_summary = tf.summary.scalar("Loss", loss)
+        loss_summary = tf.summary.scalar("Loss", self._loss)
         self._loss_summary = tf.summary.merge([loss_summary])
 
     def get_train_batch(self, batch_no, total_range):
@@ -254,7 +300,7 @@ class TransRec(Model):
         total_num = corp.n_clicks
         batch_num = total_num // batch_size + (1 if total_num % batch_size != 0 else 0)
         total_range = np.arange(total_num)
-        prepare_time, session_time, avg_l = 0, 0, 0.0
+        prepare_time, session_time, avg_l, avg_l1, avg_l2 = 0, 0, 0.0, 0.0, 0.0
         batch_start = time.time()
         for b_no in range(batch_num):
             # Batch Begin!
@@ -270,20 +316,25 @@ class TransRec(Model):
             prepare_time += time.time() - prepare_start
 
             session_start = time.time()
-            [summary, _, l, step] = self._session.run(
-                [self._loss_summary, self._train, self._loss, self.global_step],
+            [summary, _, l1, l2, step] = self._session.run(
+                [self._loss_summary, self._train, self._loss1, self._loss2, self.global_step],
                 feed_dict=feed_dict
             )
             if opts.write_summary:
                 self._train_writer.add_summary(summary, step)
-            avg_l += l
+            avg_l += l1 + l2
+            avg_l1 += l1
+            avg_l2 += l2
             # TODO: fast norm item_emb and all_user_emb
             session_time += (time.time() - session_start)
             # self.show_params(u, prev_i, pos_i, neg_i)
-        avg_l /= batch_num
+        self._session.run([self._norm_item_emb])
+        avg_l /= batch_num * batch_size
+        avg_l1 /= batch_num * batch_size
+        avg_l2 /= batch_num * batch_size
         print("\n  Time: np: {:<.3f}s, tf: {:<.3f}s, total:[{:<.3f}s]".format(
             prepare_time, session_time, time.time() - batch_start))
-        print("  Loss: {}\n".format(avg_l))
+        print("  l1: {:<.5f}, l2: {:<.5f}, Loss: {:<.5f}\n".format(avg_l1, avg_l2, avg_l))
 
     def train(self):
         opts = self._options
@@ -292,14 +343,24 @@ class TransRec(Model):
             print("  Inter {}".format(i), end=' ')
             self.one_iter()
             self.last_save_epoch += 1
-            if (i + 1) % 10 == 0:
+            if (i + 1) % 50 == 0:
                 self.show_params()
-                res = self.eval(sample=True, epoch=i)
-                if res == utils.train_return['OVERFIT']:
+                # self._session.run(self._norm_param_op)
+                best_auc, best_iter = self.best_valid_auc.eval(), self.best_iter.eval()
+                print("  Best valid AUC: {:<.6f}({})".format(best_auc, best_iter))
+                valid_auc, valid_hr, test_auc, test_hr = self.eval(sample=True, epoch=i)
+                # record best result
+                if valid_auc >= best_auc:
+                    self._session.run([tf.assign(self.best_valid_auc, valid_auc), tf.assign(self.best_iter, i)])
+                    self._session.run(self._save_best_param_op)
+                elif i - best_iter > 400:
+                    # TODO: test overfit stop
+                    print('  Overfitted. Exiting... ', end='\n\n')
                     break
-            if (i + 1) % 20 == 0:
+            if (i + 1) % 50 == 0:
                 self.save_model()
-        self.restore_best_parameters()
+        self._session.run(self._restore_best_param_op)
+        self._session.run(self._norm_param_op)
         if opts.write_summary:
             self._train_writer.close()
             self._test_writer.close()
@@ -317,3 +378,21 @@ class TransRec(Model):
         # print("  @neg_item({})\n  ".format(neg_i), end='')
         # print(self._item_emb[neg_i].eval())
         print()
+
+    def save_model(self):
+        opts = self._options
+        path = self.saver.save(self._session, "{}{}_{}.ckpt".format(
+            opts.checkpoints_path, opts.timestamp, self.last_save_epoch))
+        print("  Saved to {}".format(path), end="\n\n")
+
+    def load_model(self, file_path):
+        file_name = file_path[file_path.rfind('/') + 1:file_path.rfind('.')]
+        self._options.timestamp = file_name.split('_')[0]
+        self.last_save_epoch = int(file_name.split('_')[1])
+        self.saver.restore(self._session, file_path)
+        print("  Load model from {}".format(file_path), end="\n\n")
+
+    def to_string(self):
+        opts = self._options
+        return "TransRec__K_{}_lambda_{}_relationReg_{}_biasReg_{}".format(
+            opts.emb_dim, opts.reg, opts.user_reg, opts.bias_reg)

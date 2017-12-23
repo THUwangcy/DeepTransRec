@@ -28,9 +28,6 @@ class Model(object):
         self._clicked_per_user = list()  # distinct items clicked per user
 
         # Eval
-        self.best_valid_auc = -1
-        self.best_test_auc = -1
-        self.dist_to_best_iter = 0
         self.final_valid_auc = -1
         self.final_test_auc = -1
         self.final_valid_hr = -1
@@ -64,6 +61,9 @@ class Model(object):
         self._avg_test_auc = None
         self._avg_valid_hr = None
         self._avg_test_hr = None
+
+        self.best_valid_auc = None
+        self.best_iter = None
         # Summary
         self._eval_summary = None
         self._test_writer = None
@@ -73,18 +73,17 @@ class Model(object):
     def _gen_valid_test(self):
         corp = self._corpus
         for u in range(corp.n_users):
-            pos_seq = corp.pos_per_user[u]
-            if len(pos_seq) >= 3:
-                self._test_pos_item.append(pos_seq[-1]['item'])
+            if len(corp.pos_per_user[u]) >= 3:
+                self._test_pos_item.append(corp.pos_per_user[u][-1]['item'])
                 del corp.pos_per_user[u][-1]
-                self._valid_pos_item.append(pos_seq[-1]['item'])
-                self._valid_prev_item.append(pos_seq[-2]['item'])
+                self._valid_pos_item.append(corp.pos_per_user[u][-1]['item'])
+                self._valid_prev_item.append(corp.pos_per_user[u][-2]['item'])
                 del corp.pos_per_user[u][-1]
             else:
                 self._test_pos_item.append(-1)
                 self._valid_pos_item.append(-1)
                 self._valid_prev_item.append(-1)
-            self._clicked_per_user.append(set([x['item'] for x in pos_seq]))
+            self._clicked_per_user.append(set([x['item'] for x in corp.pos_per_user[u]]))
 
     @abstractmethod
     def predict(self, cur_user, prev_item, target_item):
@@ -98,7 +97,7 @@ class Model(object):
         pass
 
     @abstractmethod
-    def save_best_parameters(self):
+    def predict_eval(self, cur_user, prev_item, target_item):
         pass
 
     @abstractmethod
@@ -185,6 +184,9 @@ class Model(object):
         self._total_valid_hr = tf.placeholder(dtype=tf.int32, name="total_valid_hr")
         self._total_test_hr = tf.placeholder(dtype=tf.int32, name="total_test_hr")
         self._total_users = tf.placeholder(dtype=tf.int32, name="total_users")
+
+        self.best_valid_auc = tf.Variable(-1.0, dtype=tf.float32, trainable=False, name="best_valid_auc")
+        self.best_iter = tf.Variable(0, trainable=False, name="best_iter")
 
         self._avg_valid_auc = self._total_valid_auc / self._total_max
         self._avg_test_auc = self._total_test_auc / self._total_max
@@ -338,18 +340,7 @@ class Model(object):
                 prepare_time, session_time, time.time() - eval_start))
         print('  ---------------------------------------------------------------------------------', end="\n\n")
         sys.stdout.flush()
-
-        # record best result
-        if valid_auc >= self.best_valid_auc:
-            self.best_valid_auc = valid_auc
-            self.best_test_auc = test_auc
-            self.dist_to_best_iter = 0
-            self.save_best_parameters()
-        else:
-            self.dist_to_best_iter += 1
-        if self.dist_to_best_iter > 100:
-            return utils.train_return['OVERFIT']
-        return utils.train_return['FINE']
+        return valid_auc, valid_hr, test_auc, test_hr
 
     def cal_in_np(self, u, eval_item_pool):
         """
